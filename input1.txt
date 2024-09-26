@@ -1,7 +1,6 @@
 % Number of tests : 5
 % Number of machines : 2
 % Number of resources : 1
-% Maximum makespan : 10
 test( ’t1’, 3, [], [])
 test( ’t2’, 2, [], [’r1’])
 test( ’t3’, 4, [], [’r1’])
