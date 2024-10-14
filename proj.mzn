@@ -14,7 +14,7 @@ int: max_time = sum(durations);
 array[1..n_tests] of var 0..max_time: start_times;
 array[1..n_tests] of var 0..max_time: end_times;
 array[1..n_tests] of var 1..n_machines: assigned_machine;
-var 0..max_time: makespan;
+var min_makespan..max_makespan: makespan;
 
 % Constraints
 constraint
@@ -53,4 +53,4 @@ constraint makespan <= max_makespan;
 constraint makespan >= min_makespan;
 
 % Objective
-solve minimize makespan;
+solve :: int_search(start_times, input_order, indomain_min, complete) minimize makespan;
