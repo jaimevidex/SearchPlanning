@@ -1,189 +1,181 @@
-import minizinc
+import os
 import sys
-import re
 import time
+from minizinc import Instance, Model, Solver
+import ast
+from datetime import timedelta
 
-# Function to parse and convert the test data from .txt file
-def parse_test_file(filename):
-    with open(filename, 'r') as file:
+def parse_input(input_file):
+    # Open and read the input file
+    with open(input_file, 'r') as file:
         lines = file.readlines()
-    
-    # Extract number of tests, machines, resources
-    test_info = {
-        'T': 0,
-        'M': 0,
-        'R': 0,
-        'tests': []
-    }
 
-    allMachines = []
-    
+    # Initialize variables for the problem
+    n_tests = 0
+    n_machines = 0
+    n_resources = 0
+    tests = []
+
     for line in lines:
         line = line.strip()
         if line.startswith('%'):
-            if 'Number of tests' in line:
-                test_info['T'] = int(re.search(r': (\d+)', line).group(1))
-            elif 'Number of machines' in line:
-                test_info['M'] = int(re.search(r': (\d+)', line).group(1))
-                for i in range(0,test_info['M'] ):
-                    allMachines.append("m"+str(i+1))
+            if 'Number of machines' in line:
+                n_machines = int(line.split(':')[1].strip())  # Extract number of machines
             elif 'Number of resources' in line:
-                test_info['R'] = int(re.search(r': (\d+)', line).group(1))
-        elif line.startswith('test'):
-            # Parse each test
-            test_match = re.search(r"test\(\s*'(\w+)'\s*,\s*(\d+)\s*,\s*\[(.*?)\]\s*,\s*\[(.*?)\]\s*\)", line)
-            name = test_match.group(1)
-            duration = int(test_match.group(2))
-            
-            # Extract machines and resources
-            raw_machines = test_match.group(3)
-            raw_resources = test_match.group(4)
-            
-            # Normalize quotes and split the values
-            machines = [m.strip().strip("'") for m in raw_machines.split(',') if m.strip()]
-            resources = [r.strip().strip("'") for r in raw_resources.split(',') if r.strip()]
-            
-            # Check if machines list is empty, and use all available machines if so
-            if not machines:
-                machines = allMachines  # Use the global variable
-            
-            test_info['tests'].append((name, duration, machines, resources))
-                    
-    return test_info
+                n_resources = int(line.split(':')[1].strip())  # Extract number of resources
+            continue
+        if line.startswith('test('):
+            # Extract the content inside the parentheses
+            test_content = line[line.find('(')+1 : line.rfind(')')]
+            # Safely evaluate the content
+            test_data = ast.literal_eval(f"({test_content})")
+            test_name = test_data[0]
+            duration = test_data[1]
+            machines = test_data[2]
+            resources = test_data[3]
+            tests.append((test_name, duration, machines, resources))
+            n_tests += 1
 
-# Convert parsed data to MiniZinc format
-def convert_to_mzn_format(test_info):
-    durations = []
-    allowed_machines = []
-    required_resources = []
-    
-    # Convert tests
-    for test in test_info['tests']:
-        name, duration, machines, resources = test
-        
-        # Append duration
-        durations.append(duration)
-        
-        # If machines list is empty, allow any machine
-        if not machines:
-            allowed_machines.append(set(range(1, test_info['M'] + 1)))
-        else:
-            allowed_machines.append(set(int(m[1]) for m in machines))
-        
-        # If resources list is empty, add an empty set
-        if not resources:
-            required_resources.append(set())
-        else:
-            required_resources.append(set(int(r[1]) for r in resources))
-    
-    return durations, allowed_machines, required_resources
+    return n_tests, n_machines, n_resources, tests
 
-# Load data from .txt file and prepare for MiniZinc
-def load_test_data(filename):
-    test_info = parse_test_file(filename)
-    durations, allowed_machines, required_resources = convert_to_mzn_format(test_info)
-    return test_info['T'], test_info['M'], test_info['R'], durations, allowed_machines, required_resources
+def write_output(output_file, makespan, machine_assignments):
+    with open(output_file, 'w') as file:
+        file.write(f"% Makespan :  {makespan}\n")
+        # Sort machines numerically
+        for machine, details in sorted(machine_assignments.items(), key=lambda x: int(x[0][1:])):
+            machine_output = f"machine( '{machine}', {details['total_duration']}, ["
+            # Sort tasks by start_time
+            tasks_sorted = sorted(details['tasks'], key=lambda x: x[1])  # x[1] is start_time
+            task_strings = []
+            for task_name, start_time, resources in tasks_sorted:
+                if resources:
+                    resources_str = '[' + ','.join(f"'{r}'" for r in resources) + ']'
+                    task_strings.append(f"('{task_name}',{start_time},{resources_str})")
+                else:
+                    task_strings.append(f"('{task_name}',{start_time})")
+            machine_output += ','.join(task_strings) + "])\n"
+            file.write(machine_output)
 
-def process_schedule(result, T, test_info):
-    machine_schedule = {}
-    
-    # Create a dictionary to map test IDs to their resource usage
-    test_resources = {test[0]: test[3] for test in test_info['tests']}  # Assuming test_info['tests'] has (name, duration, machines, resources)
-    
-    # Collect task details for each machine
-    task_details = []
-    for i in range(1, T + 1):
-        m = result["machine"][i - 1]  # Machine to which the test is assigned
-        start_time = result["start"][i - 1]  # Start time of the test
-        test_id = f't{i}'  # Test identifier
-        resources = test_resources.get(test_id, [])  # Resources required for the test
-        
-        # Format the task details with optional resources
-        task_detail = (f"'{test_id}'", start_time,)  # Start with test_id and start_time as a tuple
-        if resources:
-            resources = list(resources)  # Convert the set to a list to access elements
-            # If there are resources, add them as part of the tuple
-            task_detail = (f"'{test_id}'", start_time, [f"r{r}" for r in resources])
-        
-        # Collect task details to be sorted later
-        task_details.append((m, task_detail))
+def compute_optimal_makespan(n_tests, n_machines, n_resources, tests):
+    # Initialize total durations
+    resource_durations = {f"r{i+1}": 0 for i in range(n_resources)}
+    machine_durations = {f"m{i+1}": 0 for i in range(n_machines)}
+    total_duration = 0
+    max_test_duration = 0
 
-    # Group tasks by machine and sort by start time for each machine
-    for m, task_detail in task_details:
-        if m not in machine_schedule:
-            machine_schedule[m] = []
-        machine_schedule[m].append(task_detail)
-    
-    # Sort tasks by start time for each machine
-    for m in machine_schedule:
-        machine_schedule[m].sort(key=lambda x: x[1])  # Sort by the second element (start_time)
-    
-    # Format the task details into strings for each machine
-    for m in machine_schedule:
-        machine_schedule[m] = [f"({', '.join(map(str, task))})" for task in machine_schedule[m]]
-    
-    return machine_schedule
+    for test in tests:
+        test_name, duration, machines, resources = test
+        total_duration += duration
+        max_test_duration = max(max_test_duration, duration)
 
-def output_results(filename, result, test_info, machines_schedule):
-    with open(filename, 'w') as file:
-        # Write makespan
-        file.write(f"% Makespan : {result['makespan']}\n")
-        # Write machine schedules
-        for m in range(1, test_info['M'] + 1):
-            machine_tasks = machines_schedule.get(m, [])
-            tasks_str = ','.join(machine_tasks)
-            file.write(f"machine( 'm{m}', {len(machine_tasks)}, [{tasks_str}])\n")
+        # Update resource durations
+        for r in resources:
+            resource_durations[r] += duration
 
+        # Update machine durations
+        if machines:
+            for m in machines:
+                machine_durations[m] += duration
 
-# Main execution
+    # Compute maximal total durations
+    max_resource_duration = max(resource_durations.values(), default=0)
+    max_machine_duration = max(machine_durations.values(), default=0)
+    workload_per_machine = total_duration / n_machines
+
+    # Estimate optimal makespan
+    optimal_makespan_estimate = max(
+        max_resource_duration,
+        max_machine_duration,
+        max_test_duration,
+        workload_per_machine
+    )
+
+    return optimal_makespan_estimate
+
+def main(input_file, output_file):
+    start_time = time.time()  # Record the start time
+
+    # Parse the input file
+    n_tests, n_machines, n_resources, tests = parse_input(input_file)
+
+    # Compute minimal makespan estimate
+    optimal_makespan_estimate = int(compute_optimal_makespan(n_tests, n_machines, n_resources, tests))
+    print(f"\nEstimated optimal makespan: {optimal_makespan_estimate}")
+
+    # Set min_makespan and max_makespan to the estimated minimal makespan
+    min_makespan = optimal_makespan_estimate
+    max_makespan = optimal_makespan_estimate
+    print(f"Setting makespan to: {optimal_makespan_estimate}")
+
+    # Define the MiniZinc model and solver
+    proj_model = Model("proj.mzn")  # Ensure proj.mzn is in the same directory
+    chuffed = Solver.lookup("chuffed")  # Use Chuffed solver
+
+    # Create an instance of the model
+    instance = Instance(chuffed, proj_model)
+
+    # Prepare the input data for the model
+    durations = [test[1] for test in tests]
+    required_machines = [set([int(m.strip('m')) for m in test[2]]) if test[2] else set(range(1, n_machines + 1)) for test in tests]
+    required_resources = [set([int(r.strip('r')) for r in test[3]]) if test[3] else set() for test in tests]
+
+    # Assign data to MiniZinc instance
+    instance["n_tests"] = n_tests
+    instance["n_machines"] = n_machines
+    instance["n_resources"] = n_resources
+    instance["durations"] = durations
+    instance["required_machines"] = required_machines
+    instance["required_resources"] = required_resources
+    instance["min_makespan"] = min_makespan
+    instance["max_makespan"] = max_makespan
+    instance["MODE"] = 0  # Set to satisfaction mode
+
+    # Solve the instance with a time limit and multiple processes
+    result = instance.solve(timeout=timedelta(minutes=5), processes=4)
+
+    # Check if the model found a feasible solution
+    if result.status.has_solution():
+        # Retrieve results from the solution
+        makespan = result["makespan"]
+        start_times = result["start_times"]
+        assigned_machine = result["assigned_machine"]
+
+        # Initialize machine_assignments with all machines
+        machine_assignments = {f"m{i}": {'total_duration': 0, 'tasks': []} for i in range(1, n_machines + 1)}
+
+        # Process machine assignments and group tasks by machine
+        for i in range(n_tests):
+            machine_idx = assigned_machine[i]  # Assigned machine index (1-based)
+            machine = f"m{machine_idx}"
+            # No need to check if machine exists, since we've initialized all of them
+            task_name = tests[i][0]  # Test name
+            start_time_task = start_times[i]
+            duration = durations[i]
+            resources = [f"r{r}" for r in required_resources[i]] if required_resources[i] else []
+            machine_assignments[machine]['tasks'].append((task_name, start_time_task, resources))
+            machine_assignments[machine]['total_duration'] += duration
+
+        # Write the output to the file
+        write_output(output_file, makespan, machine_assignments)
+    else:
+        # Handle the case where no solution was found
+        print("No feasible solution found.")
+        with open(output_file, 'w') as file:
+            file.write("% No feasible solution found.\n")
+
+    elapsed_time = time.time() - start_time  # Calculate elapsed time
+
+    # Append the execution time to the output file
+    with open(output_file, 'a') as file:
+        file.write(f"% Execution Time: {elapsed_time:.2f} seconds\n")
+
 if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("Usage: python proj.py <input_file> <output_file>")
+        sys.exit(1)
+
     input_file = sys.argv[1]
     output_file = sys.argv[2]
-    # if no more arguments are provided, the default value is 0
-    nrThreads = int(sys.argv[3]) if len(sys.argv) > 3 else 0
-    
-    # Load the data from the input file
-    T, M, R, durations, allowed_machines, required_resources = load_test_data(input_file)
-    
-    # Create a MiniZinc model
-    model = minizinc.Model()
-    model.add_file("./Project.mzn")
-    
-    # Find the MiniZinc solver configuration for Gecode
-    solver = minizinc.Solver.lookup("chuffed")
-    instance = minizinc.Instance(solver, model)
 
-    # Assign parameters
-    instance["T"] = T
-    instance["M"] = M
-    instance["R"] = R
-    instance["duration"] = durations
-    instance["allowed_machines"] = allowed_machines
-    instance["required_resources"] = required_resources
-    
-    # Set the number of threads
-    if nrThreads != 0 :
-        instance["threads"] = nrThreads # Adjust the number of threads as needed 
-
-
-    # Record the start time
-    start_time = time.time()
-    # Solve asynchronously
-    result = instance.solve()
-    # Record the end time
-    end_time = time.time()
-
-    # Calculate the elapsed time
-    elapsed_time = end_time - start_time
-
-    # Process the result to map tasks to machines
-    machine_schedule = process_schedule(result, T, {
-        'tests': [(f't{i+1}', duration, machines, resources) for i, (duration, machines, resources) in enumerate(zip(durations, allowed_machines, required_resources))]
-    })
-    
-        # Output the result to the output file
-    output_results(output_file, result, {"T": T, "M": M, "R": R}, machine_schedule)
-
-    # Output the elapsed time to the output file
-    with open(output_file, 'a') as f:
-        f.write(f"\nElapsed time: {elapsed_time:.2f} seconds\n")
+    # Run the main function
+    main(input_file, output_file)
