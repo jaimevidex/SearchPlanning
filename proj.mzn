@@ -12,45 +12,34 @@ int: max_time = sum(durations);
 
 % Decision variables
 array[1..n_tests] of var 0..max_time: start_times;
-array[1..n_tests] of var 0..max_time: end_times;
 array[1..n_tests] of var 1..n_machines: assigned_machine;
 var min_makespan..max_makespan: makespan;
-
-% Constraints
-constraint
-    forall(i in 1..n_tests) (
-        end_times[i] = start_times[i] + durations[i]
-    );
 
 % No overlap on the same machine
 constraint
     forall(i, j in 1..n_tests where i < j)(
         assigned_machine[i] = assigned_machine[j] ->
-        (start_times[i] >= end_times[j] \/ start_times[j] >= end_times[i])
+        (start_times[i] >= start_times[j] + durations[j] \/ start_times[j] >= start_times[i] + durations[i])
     );
 
 % No overlap if resources conflict
 constraint
     forall(i, j in 1..n_tests where i < j)(
         card(required_resources[i] intersect required_resources[j]) > 0 ->
-        (start_times[i] >= end_times[j] \/ start_times[j] >= end_times[i])
+        (start_times[i] >= start_times[j] + durations[j] \/ start_times[j] >= start_times[i] + durations[i])
     );
 
 % Enforce machine requirements
 constraint
     forall(i in 1..n_tests)(
-        (card(required_machines[i]) > 0) ->
         assigned_machine[i] in required_machines[i]
     );
 
 % Makespan definition
 constraint
     forall(i in 1..n_tests)(
-        makespan >= end_times[i]
+        makespan >= start_times[i] + durations[i]
     );
 
-constraint makespan <= max_makespan;
-constraint makespan >= min_makespan;
-
 % Objective
-solve :: int_search(start_times, input_order, indomain_min, complete) minimize makespan;
+solve minimize makespan;

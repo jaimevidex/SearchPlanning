@@ -1,173 +1,230 @@
-import os
 import sys
 import time
 from minizinc import Instance, Model, Solver
 import ast
 from datetime import timedelta
+import networkx as nx
 
-def parse_input(input_file):
-    # Open and read the input file
-    with open(input_file, 'r') as file:
-        lines = file.readlines()
+# conflict graph creation and clique finding functions
+def create_conflict_graph(test_cases):
+    graph = nx.Graph()
+    for idx1, test1 in enumerate(test_cases):
+        name1, duration1, machines1, resources1 = test1
+        graph.add_node(idx1, duration=duration1)
+        for idx2, test2 in enumerate(test_cases):
+            if idx1 < idx2:
+                name2, duration2, machines2, resources2 = test2
+                if set(resources1).intersection(resources2):
+                    graph.add_edge(idx1, idx2)
+    return graph
 
-    # Initialize variables for the problem
-    n_tests = 0
-    n_machines = 0
-    n_resources = 0
-    tests = []
+def get_max_weighted_clique(graph):
+    # Heuristic approach to find the heaviest clique
+    best_clique = []
+    highest_weight = 0
+    for clique in nx.find_cliques(graph):
+        current_weight = sum(graph.nodes[node]['duration'] for node in clique)
+        if current_weight > highest_weight:
+            highest_weight = current_weight
+            best_clique = clique
+    return highest_weight, best_clique
+
+# read and parse input
+def read_input(file_path):
+    with open(file_path, 'r') as f:
+        lines = f.readlines()
+
+    total_tests = 0
+    total_machines = 0
+    total_resources = 0
+    test_list = []
 
     for line in lines:
         line = line.strip()
         if line.startswith('%'):
             if 'Number of machines' in line:
-                n_machines = int(line.split(':')[1].strip())  # Extract number of machines
+                total_machines = int(line.split(':')[1].strip())
             elif 'Number of resources' in line:
-                n_resources = int(line.split(':')[1].strip())  # Extract number of resources
+                total_resources = int(line.split(':')[1].strip())
             continue
         if line.startswith('test('):
-            # Extract the content inside the parentheses
-            test_content = line[line.find('(')+1 : line.rfind(')')]
-            # Safely evaluate the content
-            test_data = ast.literal_eval(f"({test_content})")
-            test_name = test_data[0]
-            duration = test_data[1]
-            machines = test_data[2]
-            resources = test_data[3]
-            tests.append((test_name, duration, machines, resources))
-            n_tests += 1
+            content = line[line.find('(')+1 : line.rfind(')')]
+            test_data = ast.literal_eval(f"({content})")
+            test_name, duration, machines, resources = test_data
+            test_list.append((test_name, duration, machines, resources))
+            total_tests += 1
 
-    return n_tests, n_machines, n_resources, tests
+    return total_tests, total_machines, total_resources, test_list
 
-def write_output(output_file, makespan, machine_assignments):
-    with open(output_file, 'w') as file:
-        file.write(f"% Makespan :  {makespan}\n")
-        # Sort machines numerically
-        for machine, details in sorted(machine_assignments.items(), key=lambda x: int(x[0][1:])):
-            machine_output = f"machine( '{machine}', {details['total_duration']}, ["
-            # Sort tasks by start_time
-            tasks_sorted = sorted(details['tasks'], key=lambda x: x[1])  # x[1] is start_time
-            task_strings = []
-            for task_name, start_time, resources in tasks_sorted:
+def output_results(file_path, makespan, machine_details):
+    with open(file_path, 'w') as f:
+        f.write(f"% Makespan :  {makespan}\n")
+        # Order machines numerically
+        for machine, info in sorted(machine_details.items(), key=lambda x: int(x[0][1:])):
+            task_count = len(info['tasks'])
+            machine_line = f"machine( '{machine}', {task_count}, ["
+            # Order tasks by their start times
+            sorted_tasks = sorted(info['tasks'], key=lambda task: task[1])
+            task_entries = []
+            for task_name, start_time, resources in sorted_tasks:
                 if resources:
-                    resources_str = '[' + ','.join(f"'{r}'" for r in resources) + ']'
-                    task_strings.append(f"('{task_name}',{start_time},{resources_str})")
+                    res_str = '[' + ','.join(f"'{res}'" for res in resources) + ']'
+                    task_entries.append(f"('{task_name}',{start_time},{res_str})")
                 else:
-                    task_strings.append(f"('{task_name}',{start_time})")
-            machine_output += ','.join(task_strings) + "])\n"
-            file.write(machine_output)
+                    task_entries.append(f"('{task_name}',{start_time})")
+            machine_line += ','.join(task_entries) + "])\n"
+            f.write(machine_line)
 
-def compute_optimal_makespan(n_tests, n_machines, n_resources, tests):
-    # Initialize total durations
-    resource_durations = {f"r{i+1}": 0 for i in range(n_resources)}
-    machine_durations = {f"m{i+1}": 0 for i in range(n_machines)}
-    total_duration = 0
-    max_test_duration = 0
+#Lower bound estimation
+def estimate_optimal_makespan(num_machines, num_resources, test_cases):
+    resource_times = {f"r{i+1}": 0 for i in range(num_resources)}
+    machine_times = {f"m{i+1}": 0 for i in range(num_machines)}
+    total_time = 0
+    longest_test = 0
 
-    for test in tests:
-        test_name, duration, machines, resources = test
-        total_duration += duration
-        max_test_duration = max(max_test_duration, duration)
+    for test in test_cases:
+        name, duration, machines, resources = test
+        total_time += duration
+        longest_test = max(longest_test, duration)
 
-        # Update resource durations
-        for r in resources:
-            resource_durations[r] += duration
+        # Accumulate resource usage
+        for res in resources:
+            resource_times[res] += duration
 
-        # Update machine durations
+        # Accumulate machine usage
         if machines:
-            for m in machines:
-                machine_durations[m] += duration
+            for mach in machines:
+                machine_times[mach] += duration / len(machines)
+        else:
+            for mach in machine_times:
+                machine_times[mach] += duration / num_machines
 
-    # Compute maximal total durations
-    max_resource_duration = max(resource_durations.values(), default=0)
-    max_machine_duration = max(machine_durations.values(), default=0)
-    workload_per_machine = total_duration / n_machines
+    max_resource = max(resource_times.values(), default=0)
+    max_machine = max(machine_times.values(), default=0)
+    avg_workload = total_time / num_machines
 
-    # Estimate optimal makespan
-    optimal_makespan_estimate = max(
-        max_resource_duration,
-        max_machine_duration,
-        max_test_duration,
-        workload_per_machine
+    # Create conflict graph and identify the heaviest clique
+    conflict_graph = create_conflict_graph(test_cases)
+    clique_weight, _ = get_max_weighted_clique(conflict_graph)
+
+    optimal_estimate = max(
+        max_resource,
+        max_machine,
+        longest_test,
+        avg_workload,
+        clique_weight
     )
 
-    return optimal_makespan_estimate
+    return optimal_estimate
 
-def main(input_file, output_file):
-    start_time = time.time()  # Record the start time
+def assign_schedule(test_indices, num_machines, num_resources, test_cases, output_file, start_timer):
+    required_machines = []
+    required_resources = []
+    for idx in test_indices:
+        machines = test_cases[idx][2]
+        resources = test_cases[idx][3]
+        machines_set = set(int(m.replace('m', '')) for m in machines) if machines else set(range(1, num_machines + 1))
+        required_machines.append(machines_set)
+        resources_set = set(int(r.replace('r', '')) for r in resources) if resources else set()
+        required_resources.append(resources_set)
 
-    # Parse the input file
-    n_tests, n_machines, n_resources, tests = parse_input(input_file)
+    resource_map = {}
+    for pos, idx in enumerate(test_indices):
+        for res in required_resources[pos]:
+            resource_map.setdefault(res, set()).add(idx)
 
-    # Compute minimal makespan estimate
-    optimal_makespan_estimate = int(compute_optimal_makespan(n_tests, n_machines, n_resources, tests))
-    print(f"\nEstimated optimal makespan: {optimal_makespan_estimate}")
+    restriction_scores = []
+    for pos, idx in enumerate(test_indices):
+        test = test_cases[idx]
+        _, _, machines, resources = test
+        avail_machines = len(required_machines[pos])
+        req_resources = len(required_resources[pos])
 
-    # Set min_makespan and max_makespan to the estimated minimal makespan
-    min_makespan = optimal_makespan_estimate
-    max_makespan = optimal_makespan_estimate
-    print(f"Setting makespan to: {optimal_makespan_estimate}")
+        conflicts = set()
+        for res in required_resources[pos]:
+            conflicts.update(resource_map[res])
+        conflicts.discard(idx)
+        num_conflicts = len(conflicts)
 
-    # Define the MiniZinc model and solver
-    proj_model = Model("proj.mzn")  # Ensure proj.mzn is in the same directory
-    chuffed = Solver.lookup("chuffed")  # Use Chuffed solver
+        score = (num_machines - avail_machines) + req_resources + num_conflicts
+        restriction_scores.append((idx, score))
 
-    # Create an instance of the model
-    instance = Instance(chuffed, proj_model)
+    # Sort tests by restriction score descending
+    restriction_scores.sort(key=lambda x: -x[1])
+    sorted_indices = [idx for idx, _ in restriction_scores]
 
-    # Prepare the input data for the model
-    durations = [test[1] for test in tests]
-    required_machines = [set([int(m.strip('m')) for m in test[2]]) if test[2] else set(range(1, n_machines + 1)) for test in tests]
-    required_resources = [set([int(r.strip('r')) for r in test[3]]) if test[3] else set() for test in tests]
+    # Estimate makespan
+    relevant_tests = [test_cases[idx] for idx in sorted_indices]
+    makespan_est = int(estimate_optimal_makespan(num_machines, num_resources, relevant_tests))
 
-    # Assign data to MiniZinc instance
-    instance["n_tests"] = n_tests
-    instance["n_machines"] = n_machines
-    instance["n_resources"] = n_resources
+    min_mk = makespan_est
+    max_mk = makespan_est + 10
+
+    # Initialize MiniZinc model and solver
+    model = Model("proj.mzn")
+    solver = Solver.lookup("chuffed")
+    instance = Instance(solver, model)
+
+    durations = [test_cases[idx][1] for idx in sorted_indices]
+    req_machines = [
+        set(int(m.replace('m', '')) for m in test_cases[idx][2]) if test_cases[idx][2] else set(range(1, num_machines + 1))
+        for idx in sorted_indices
+    ]
+    req_resources = [
+        set(int(r.replace('r', '')) for r in test_cases[idx][3]) if test_cases[idx][3] else set()
+        for idx in sorted_indices
+    ]
+
+    instance["n_tests"] = len(sorted_indices)
+    instance["n_machines"] = num_machines
+    instance["n_resources"] = num_resources
     instance["durations"] = durations
-    instance["required_machines"] = required_machines
-    instance["required_resources"] = required_resources
-    instance["min_makespan"] = min_makespan
-    instance["max_makespan"] = max_makespan
-    instance["MODE"] = 0  # Set to satisfaction mode
+    instance["required_machines"] = req_machines
+    instance["required_resources"] = req_resources
+    instance["min_makespan"] = min_mk
+    instance["max_makespan"] = max_mk
 
-    # Solve the instance with a time limit and multiple processes
-    result = instance.solve(timeout=timedelta(minutes=5), processes=4)
+    # Solve with timeout and parallel processing
+    solution = instance.solve(timeout=timedelta(minutes=4.5), processes=4)
 
-    # Check if the model found a feasible solution
-    if result.status.has_solution():
-        # Retrieve results from the solution
-        makespan = result["makespan"]
-        start_times = result["start_times"]
-        assigned_machine = result["assigned_machine"]
+    if solution.status.has_solution():
+        final_makespan = solution["makespan"]
+        start_times = solution["start_times"]
+        machine_assignment = solution["assigned_machine"]
 
-        # Initialize machine_assignments with all machines
-        machine_assignments = {f"m{i}": {'total_duration': 0, 'tasks': []} for i in range(1, n_machines + 1)}
+        machines_info = {f"m{i}": {'total_duration': 0, 'tasks': []} for i in range(1, num_machines + 1)}
+        index_to_name = {idx: test_cases[idx][0] for idx in sorted_indices}
 
-        # Process machine assignments and group tasks by machine
-        for i in range(n_tests):
-            machine_idx = assigned_machine[i]  # Assigned machine index (1-based)
-            machine = f"m{machine_idx}"
-            # No need to check if machine exists, since we've initialized all of them
-            task_name = tests[i][0]  # Test name
-            start_time_task = start_times[i]
-            duration = durations[i]
-            resources = [f"r{r}" for r in required_resources[i]] if required_resources[i] else []
-            machine_assignments[machine]['tasks'].append((task_name, start_time_task, resources))
-            machine_assignments[machine]['total_duration'] += duration
+        for res_idx, test_idx in enumerate(sorted_indices):
+            assigned_mach = machine_assignment[res_idx]
+            machine = f"m{assigned_mach}"
+            task_name = index_to_name[test_idx]
+            start_time = start_times[res_idx]
+            duration = durations[res_idx]
+            resources = test_cases[test_idx][3] or []
+            end_time = start_time + duration
+            machines_info[machine]['tasks'].append((task_name, start_time, resources))
+            machines_info[machine]['total_duration'] = max(machines_info[machine]['total_duration'], end_time)
 
-        # Write the output to the file
-        write_output(output_file, makespan, machine_assignments)
+        output_results(output_file, final_makespan, machines_info)
+        elapsed = time.time() - start_timer
+        #Execution time
+        # with open(output_file, 'a') as f:
+        #     f.write(f"% Execution Time: {elapsed:.2f} seconds\n")
     else:
-        # Handle the case where no solution was found
-        print("No feasible solution found.")
-        with open(output_file, 'w') as file:
-            file.write("% No feasible solution found.\n")
+        print("No feasible solution found for the provided tests.")
+        with open(output_file, 'w') as f:
+            f.write("% No feasible solution found for the provided tests.\n")
+        elapsed = time.time() - start_timer
+        with open(output_file, 'a') as f:
+            f.write(f"% Execution Time: {elapsed:.2f} seconds\n")
 
-    elapsed_time = time.time() - start_time  # Calculate elapsed time
+def main(input_path, output_path):
+    start_time = time.time()
 
-    # Append the execution time to the output file
-    with open(output_file, 'a') as file:
-        file.write(f"% Execution Time: {elapsed_time:.2f} seconds\n")
+    num_tests, num_machines, num_resources, tests = read_input(input_path)
+    test_indices = range(num_tests)
+    assign_schedule(test_indices, num_machines, num_resources, tests, output_path, start_time)
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
@@ -177,5 +234,4 @@ if __name__ == "__main__":
     input_file = sys.argv[1]
     output_file = sys.argv[2]
 
-    # Run the main function
     main(input_file, output_file)
