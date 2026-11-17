@@ -2,7 +2,6 @@
 
 Scheduling a test suite across machines and shared resources is a hard combinatorial problem. This project models it in **MiniZinc**, solves it with a CP solver, and uses a **conflict-graph heuristic** to estimate how good the solution is.
 
-Built for the *Planeamento e Procura* course at Instituto Superior Técnico.
 
 ## The problem
 
@@ -65,4 +64,4 @@ machine('m2', 3, [('t1',0,['r1']),...])
 | `checker.py` | Independent solution validator |
 | `tsp-instances/` | Benchmark instances |
 | `input*.txt`, `output*.txt` | Small worked examples |
-| `Project_S_P_2024_25.pdf` | Assignment statement |
+| `problem-statement.pdf` | Problem statement |
